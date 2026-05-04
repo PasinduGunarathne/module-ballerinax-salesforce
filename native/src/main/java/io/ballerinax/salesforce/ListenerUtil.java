@@ -77,7 +77,7 @@ public class ListenerUtil {
     private static final List<String> CDC_METHODS = List.of(
             Constants.ON_CREATE, Constants.ON_UPDATE, Constants.ON_DELETE, Constants.ON_RESTORE);
 
-    private static void extractBaseConfigs(BObject listener, int replayFrom,
+    private static void extractBaseConfigs(BObject listener, long replayFrom,
             BDecimal connectionTimeout, BDecimal readTimeout, BDecimal keepAliveInterval,
             BString apiVersion, Object proxyConfig) {
         listener.addNativeData(CONSUMER_SERVICES, new ArrayList<BObject>());
@@ -98,7 +98,7 @@ public class ListenerUtil {
         }
     }
 
-    public static void initListener(BObject listener, int replayFrom, boolean isSandBox,
+    public static void initListener(BObject listener, long replayFrom, boolean isSandBox,
             BDecimal connectionTimeout, BDecimal readTimeout, BDecimal keepAliveInterval,
             BString apiVersion, Object proxyConfig) {
         extractBaseConfigs(listener, replayFrom, connectionTimeout, readTimeout, keepAliveInterval,
@@ -107,7 +107,7 @@ public class ListenerUtil {
         listener.addNativeData(IS_SAND_BOX, isSandBox);
     }
 
-    public static void initListener(BObject listener, int replayFrom, BString baseUrl,
+    public static void initListener(BObject listener, long replayFrom, BString baseUrl,
             BDecimal connectionTimeout, BDecimal readTimeout, BDecimal keepAliveInterval,
             BString apiVersion, Object proxyConfig) {
         extractBaseConfigs(listener, replayFrom, connectionTimeout, readTimeout, keepAliveInterval,
@@ -126,8 +126,8 @@ public class ListenerUtil {
      * @param listener   the Ballerina {@code Listener} BObject
      * @param replayFrom the checkpoint replayId to use as the subscription start
      */
-    public static void setEffectiveReplayFrom(BObject listener, int replayFrom) {
-        listener.addNativeData(EFFECTIVE_REPLAY_FROM, (long) replayFrom);
+    public static void setEffectiveReplayFrom(BObject listener, long replayFrom) {
+        listener.addNativeData(EFFECTIVE_REPLAY_FROM, replayFrom);
     }
 
     public static Object attachService(Environment environment, BObject listener, BObject service, Object channelName) {
@@ -267,7 +267,7 @@ public class ListenerUtil {
             // Clear so the next start (e.g. proactive token refresh) uses REPLAY_FROM.
             listener.addNativeData(EFFECTIVE_REPLAY_FROM, null);
         } else {
-            replayFrom = (Integer) listener.getNativeData(REPLAY_FROM);
+            replayFrom = (Long) listener.getNativeData(REPLAY_FROM);
         }
 
         for (BObject service : services) {

@@ -216,17 +216,24 @@ public isolated class Listener {
     # + return - `()` or else a `error` upon failure to start
     public isolated function 'start() returns error? {
         if !self.isOAuth2 {
-            // `trap` catches both returned errors AND native panics from the Java
-            // ListenerUtil.startListener() call, so an INVALID_LOGIN with dummy
-            // credentials does not abort the test module and prevents the
-            // coordinator-integration tests (which don't use the SOAP listener)
-            // from being blocked. Tests that rely on real SOAP connectivity will
-            // still fail their own assertions; this only prevents a module-level crash.
+            // Empty username means SOAP credentials are absent — the listener is
+            // intentionally unconfigured. Return silently so that test modules
+            // which only exercise the OAuth2 / coordinator paths can initialise
+            // a module-level Listener without real Salesforce credentials.
+            // In production, username is always a non-empty string supplied by
+            // the caller via ListenerConfig.auth, so this branch is never reached
+            // under real workloads.
+            if self.username == "" {
+                log:printWarn("[Listener] SOAP credentials not configured — listener will be inactive.");
+                return ();
+            }
+            // `trap` converts any native Java panic from the CometD/Bayeux layer
+            // (e.g. INVALID_LOGIN thrown by ListenerUtil.startListener) into a
+            // Ballerina error so the caller receives a clean, propagatable value
+            // instead of a process-terminating JVM exception.
             error|() startResult = trap startListener(self.username, self.password, self);
             if startResult is error {
-                log:printWarn("[Listener] SOAP login failed — listener will remain inactive. " +
-                        "Provide valid username/password to enable SOAP-based streaming. " +
-                        "Error: " + startResult.message());
+                return startResult;
             }
             return ();
         }
@@ -404,6 +411,13 @@ public isolated class Listener {
     # actual expiry epoch. The job fires at (tokenExpiryEpoch - TOKEN_REFRESH_BUFFER_SECONDS)
     # to proactively refresh the CometD connection before the access token expires.
     #
+    # This is a one-shot (not recurring) design: after each successful refresh cycle,
+    # `TokenRefreshJob.execute()` calls this method again to schedule the NEXT one-shot
+    # based on the freshly-issued token's TTL. This eliminates the "startup-anchored
+    # scheduling" bug where a fixed-interval recurring job drifts out of sync with
+    # the actual token expiry — e.g., when a replica adopts a token that was refreshed
+    # by another replica and has a different expiry than the fixed interval assumes.
+    #
     # + return - `()` or else an error if scheduling fails
     isolated function scheduleTokenRefreshJob() returns error? {
         TokenManager? tm = self.tokenManager;
@@ -417,6 +431,8 @@ public isolated class Listener {
             int delaySeconds = secondsUntilExpiry - TOKEN_REFRESH_BUFFER_SECONDS;
 
             if delaySeconds <= 0 {
+                // Token is already expired or within the buffer window — fire in 1 second.
+                // scheduleOneTimeJob requires a future time, so we use a minimal delay.
                 delaySeconds = 1;
                 log:printDebug("Token already within refresh buffer — scheduling immediate refresh",
                         secondsUntilExpiry = secondsUntilExpiry,
@@ -457,6 +473,7 @@ public isolated class Listener {
     }
 
     # Returns true if a permanent token failure (e.g. invalid_grant) has been detected.
+    # Used by the token refresh job to know when to stop retrying.
     isolated function isTokenRefreshPermanentlyFailed() returns boolean {
         lock {
             return self.tokenRefreshPermanentlyFailed;
@@ -481,9 +498,16 @@ isolated class TokenRefreshJob {
 
     public function execute() {
         // --- Kill switch: check if a previous execution detected a fatal error ---
+        // When invalid_grant is detected (by getOAuth2Token() during startListenerWithOAuth2()),
+        // the tokenRefreshPermanentlyFailed flag is set. However, unscheduleTokenRefreshJob()
+        // called from within the Java interop context may not reliably cancel the scheduler.
+        // So we defensively re-unschedule here on every entry to guarantee termination.
         if self.listenerInstance.isTokenRefreshPermanentlyFailed() {
             log:printError("Proactive token scheduler terminated due to fatal authorization error. " +
                     "Re-authenticate via the authorization code grant to obtain a new refresh token.");
+            // Defensive re-unschedule: the previous unschedule attempt (from within the Java
+            // interop context in getOAuth2Token()) may have silently failed. This call runs
+            // on the task scheduler's own strand, where task:unscheduleJob() is reliable.
             error? unscheduleErr = self.listenerInstance.unscheduleTokenRefreshJob();
             if unscheduleErr is error {
                 log:printWarn("Failed to unschedule token refresh job from kill switch",
@@ -501,6 +525,8 @@ isolated class TokenRefreshJob {
         error? startErr = startListenerWithOAuth2(self.listenerInstance);
         if startErr is error {
             log:printError("Proactive token refresh failed", 'error = startErr);
+            // startListenerWithOAuth2() → getOAuth2Token() → invalid_grant sets the flag.
+            // We check it immediately after the call to prevent even ONE more scheduler tick.
             if self.listenerInstance.isTokenRefreshPermanentlyFailed() {
                 log:printError("Proactive token scheduler terminated due to fatal authorization error.");
                 error? unscheduleErr = self.listenerInstance.unscheduleTokenRefreshJob();
@@ -513,6 +539,9 @@ isolated class TokenRefreshJob {
             int newAtSecondsLeft = self.tokenManager.getSecondsUntilExpiry();
             log:printDebug("Proactive token refresh succeeded — CometD refreshed with new token",
                     newAtExpiresInMinutes = newAtSecondsLeft / 60);
+            // Schedule the NEXT one-shot based on the current token's actual TTL.
+            // This ensures every refresh cycle recalculates from the real expiry epoch,
+            // whether the token was freshly issued or adopted from the store.
             error? rescheduleErr = self.listenerInstance.scheduleTokenRefreshJob();
             if rescheduleErr is error {
                 log:printWarn("Failed to reschedule token refresh job after successful refresh",
@@ -529,7 +558,7 @@ isolated function initListener(Listener instance, int replayFrom, boolean isSand
     'class: "io.ballerinax.salesforce.ListenerUtil",
     paramTypes: [
         "io.ballerina.runtime.api.values.BObject",
-        "int",
+        "long",
         "boolean",
         "io.ballerina.runtime.api.values.BDecimal",
         "io.ballerina.runtime.api.values.BDecimal",
@@ -547,7 +576,7 @@ isolated function initListenerWithOAuth2(Listener instance, int replayFrom, stri
     'class: "io.ballerinax.salesforce.ListenerUtil",
     paramTypes: [
         "io.ballerina.runtime.api.values.BObject",
-        "int",
+        "long",
         "io.ballerina.runtime.api.values.BString",
         "io.ballerina.runtime.api.values.BDecimal",
         "io.ballerina.runtime.api.values.BDecimal",
